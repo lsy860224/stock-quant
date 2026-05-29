@@ -22,8 +22,12 @@ uv run stock-quant           # 10분 루프 상시 실행
 ```
 
 기본은 **dry-run(페이퍼)** — 실제 주문 없음. 라이브 주문은 `.env` 의 `DRY_RUN=false` +
-`uv sync --extra live`(py-clob-client) + 지갑 키가 모두 갖춰졌을 때만 동작하며, 실행 경로는
-의도적으로 미구현이다. 켜기 전 소액($20~50) 검증 필수.
+`uv sync --extra live`(py-clob-client) + `POLYGON_WALLET_PRIVATE_KEY` 가 모두 갖춰졌을 때만
+동작한다(`executor._place_live_order`). 셋 중 하나라도 없으면 명확히 거부.
+
+**라이브 사전조건:** 에이전트 전용 지갑에 USDC(Polygon) 보유 + CLOB Exchange 에 USDC
+approve 1회 설정. 지갑 유형에 따라 `CLOB_SIGNATURE_TYPE`/`CLOB_FUNDER_ADDRESS` 필요(.env 참조).
+**첫 라이브는 반드시 소액($20~50) 검증.** 오류 시 `cancel_all()` 킬스위치 자동 발동.
 
 ## 개발
 

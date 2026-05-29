@@ -97,6 +97,14 @@ python main.py
 > - 주문 토큰: `clobTokenIds`(JSON 문자열, [YES, NO]) + `conditionId`. 라이브 주문 구현 시 사용.
 > 보고서 코드를 복붙하지 말고 위 실제 필드명을 쓸 것.
 
+> **라이브 주문 (`executor._place_live_order`, py-clob-client 0.34, 구현됨):** DRY_RUN=false + `--extra live` + 지갑키 3중 게이트. 라이브 API 검증 결과:
+> - 주문 side 는 **항상 BUY** — 방향은 token id 로 결정. YES→`clobTokenIds[0]`, NO→`[1]`.
+> - `client.get_price(token_id, BUY)` → **`{"price": "0.09"}` (dict, 문자열)** — float 아님. `["price"]` 파싱 필수.
+> - `client.get_tick_size(token_id)` → 문자열(`"0.01"` 등). 가격은 tick 그리드로 반올림해야 `create_order` 의 `price_valid` 통과.
+> - `create_order(OrderArgs)` 는 tick_size·neg_risk·fee 를 내부에서 자동 resolve (options 불필요). L1 인증 필요.
+> - size = outcome 토큰 수, cost = price×size. 예산 초과 방지로 0.01 내림. `orderMinSize` 미만이면 스킵.
+> - chain_id = `POLYGON`(137). 사전조건: USDC 보유 + CLOB Exchange approve(1회, 코드 범위 밖). 킬스위치 `cancel_all()`.
+
 ## 5. 리스크 관리 (불변 가드레일 — §7.1)
 
 매매 로직을 건드릴 때 **반드시 유지**할 안전장치:

@@ -10,7 +10,7 @@ import logging
 from .config import settings
 from .cost_manager import get_current_balance, pay_api_costs_from_profits
 from .detector import find_opportunities
-from .executor import place_order
+from .executor import cancel_all_orders, place_order
 from .scanner import scan_markets
 
 log = logging.getLogger("stock_quant.agent")
@@ -31,9 +31,14 @@ def run_once(scan_limit: int = 500) -> dict:
     opps = opps[: settings.max_positions]
 
     orders = []
-    for opp in opps:
-        bet_size = bankroll * opp.fraction
-        orders.append(place_order(opp, bet_size))
+    try:
+        for opp in opps:
+            bet_size = bankroll * opp.fraction
+            orders.append(place_order(opp, bet_size))
+    except Exception:  # noqa: BLE001 — 주문 중 오류 시 미체결 전량 취소(§7.1 킬스위치)
+        log.exception("order placement failed — triggering cancel_all kill switch")
+        cancel_all_orders()
+        raise
 
     pay_api_costs_from_profits(n_calls=len(markets))
     log.info(
