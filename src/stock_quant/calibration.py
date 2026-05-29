@@ -273,12 +273,20 @@ def snapshot_predictions(
             return False
         return now < end <= cutoff
 
+    # 이미 기록된 마켓은 skip (중복 기록 → Brier 이중 카운트 방지). 누적 시 distinct 만 추가.
+    with _connect() as conn:
+        existing = {r[0] for r in conn.execute("SELECT DISTINCT condition_id FROM predictions")}
+
     markets = scan_markets(scan_limit)
     cands: list[tuple[dict[str, Any], float]] = []
+    skipped_dup = 0
     for m in markets:
         if not _is_yes_no(m) or not _ends_soon(m):
             continue
         if float(m.get("liquidityNum", 0) or 0) < settings.min_liquidity:
+            continue
+        if str(m.get("conditionId", "")) in existing:
+            skipped_dup += 1
             continue
         price = _yes_price(m)
         if price is None:
@@ -288,8 +296,12 @@ def snapshot_predictions(
             break
 
     if not cands:
-        return f"snapshot 대상 없음 (Yes/No, {horizon_days}일 내 종료, liquidity≥{settings.min_liquidity})."
-    log.info("snapshot: %d markets, context-included, LLM=%s", len(cands), settings.claude_model)
+        return (
+            f"snapshot 추가 대상 없음 (Yes/No, {horizon_days}일 내 종료, liquidity≥{settings.min_liquidity}; "
+            f"기존 기록과 중복 {skipped_dup}건 skip)."
+        )
+    log.info("snapshot: %d new markets (dup %d skip), context-included, LLM=%s",
+             len(cands), skipped_dup, settings.claude_model)
 
     def _predict(item: tuple[dict[str, Any], float]) -> tuple[dict[str, Any], float, float]:
         m, price = item
@@ -306,7 +318,7 @@ def snapshot_predictions(
     edges = [abs(fair - price) for _, price, fair in results]
     big = sum(1 for e in edges if e >= settings.edge_threshold)
     return (
-        f"snapshot: {len(results)}건 컨텍스트 포함 예측 기록 → data/calibration.db "
+        f"snapshot: {len(results)}건 신규 컨텍스트 포함 예측 기록 (중복 {skipped_dup}건 skip) → data/calibration.db "
         f"(|edge|≥{settings.edge_threshold:.0%}: {big}건). "
         f"{horizon_days}일 내 종료 예정 — 이후 `calibrate --resolve` → `--report` 로 Brier 산출."
     )
