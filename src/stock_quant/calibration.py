@@ -24,6 +24,9 @@ import requests
 from .config import settings
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "calibration.db"
+# 커밋 가능한 텍스트 시드 (원격 채점용). DB 는 gitignore 라 원격엔 없으므로,
+# 빈 DB 일 때 이 JSONL 에서 예측을 복원한다 (결과/타임스탬프는 제외 → 원격이 새로 resolve).
+_SEED_PATH = _DB_PATH.parent / "predictions_seed.jsonl"
 
 
 # --------------------------------------------------------------------------- #
@@ -320,7 +323,46 @@ def _connect() -> sqlite3.Connection:
             PRIMARY KEY (condition_id, recorded_at)
         )"""
     )
+    # 빈 DB + 시드 존재 시 복원 (원격 stateless 채점). 로컬은 이미 데이터가 있어 건너뜀.
+    if _SEED_PATH.exists() and conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0:
+        _load_seed(conn)
     return conn
+
+
+def _load_seed(conn: sqlite3.Connection) -> None:
+    import logging
+
+    rows = 0
+    with open(_SEED_PATH, encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            conn.execute(
+                "INSERT OR IGNORE INTO predictions VALUES (?,?,?,?,?,?,?,?)",
+                (d["condition_id"], d["question"], d["side"], d["predicted"],
+                 d["market_price"], None, float(i), None),
+            )
+            rows += 1
+    conn.commit()
+    logging.getLogger("stock_quant.calibration").info("seeded %d predictions from %s", rows, _SEED_PATH.name)
+
+
+def export_seed() -> int:
+    """현재 예측을 커밋용 JSONL 시드로 내보낸다 (결과·타임스탬프 제외, 비밀 없음)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT condition_id, question, side, predicted, market_price FROM predictions"
+        ).fetchall()
+    _SEED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_SEED_PATH, "w", encoding="utf-8") as f:
+        for cid, q, side, pred, mp in rows:
+            f.write(json.dumps(
+                {"condition_id": cid, "question": q, "side": side, "predicted": pred, "market_price": mp},
+                ensure_ascii=False,
+            ) + "\n")
+    return len(rows)
 
 
 def record_prediction(
