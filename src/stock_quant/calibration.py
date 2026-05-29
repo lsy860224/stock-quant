@@ -99,15 +99,19 @@ def _parse_json_list(raw: Any) -> list[Any] | None:
         return None
 
 
-def fetch_resolved_markets(limit: int = 200) -> list[dict[str, Any]]:
-    """resolved 마켓 수집. Gamma 는 페이지당 100개 상한이라 offset 으로 페이지네이션."""
+def fetch_resolved_markets(limit: int = 200, order: str = "volume24hr") -> list[dict[str, Any]]:
+    """resolved 마켓 수집. Gamma 는 페이지당 100개 상한이라 offset 으로 페이지네이션.
+
+    order="volume24hr" 는 최근 해결분에 쏠림(베이스라인용). order="volume"(총 거래량)은
+    post-cutoff 전 기간(2~6월)에 고르게 분포 → 에이전트 백테스트의 대표 표본에 적합.
+    """
     out: list[dict[str, Any]] = []
     page = 100
     offset = 0
     while len(out) < limit:
         params: dict[str, Any] = {
             "closed": True, "limit": min(page, limit - len(out)),
-            "offset": offset, "order": "volume24hr", "ascending": False,
+            "offset": offset, "order": order, "ascending": False,
         }
         resp = requests.get(f"{settings.gamma_api}/markets", params=params, headers=_ua(), timeout=30)
         resp.raise_for_status()
@@ -191,17 +195,22 @@ def resolved_yesno_records(markets: list[dict[str, Any]], since: str) -> list[di
                 market_pred = max(0.0, min(1.0, float(last) - float(chg)))
             except (ValueError, TypeError):
                 market_pred = None
-        recs.append({"question": m["question"], "actual": actual, "market_pred": market_pred})
+        recs.append({
+            "question": m["question"], "actual": actual,
+            "market_pred": market_pred, "end": (m.get("endDate") or "")[:7],
+        })
     return recs
 
 
 def backtest_agent_llm(
-    sample: int = 120, fetch_limit: int = 1000, since: str = "2026-01-31", workers: int = 8
+    sample: int = 120, fetch_limit: int = 1000, since: str = "2026-01-31",
+    workers: int = 8, order: str = "volume",
 ) -> str:
     """에이전트 LLM 의 Brier 를 resolved 마켓으로 측정 (ANTHROPIC_API_KEY 필요).
 
     lookahead 방지: (1) cutoff 이후 종료분만, (2) 라이브 컨텍스트 fetcher 비활성(context="")
     — 해결 후 데이터가 누설되지 않도록 질문+모델 지식만으로 예측.
+    order="volume"(총 거래량)로 post-cutoff 전 기간을 고르게 표집(최근 쏠림 방지).
     """
     import logging
     from concurrent.futures import ThreadPoolExecutor
@@ -209,26 +218,40 @@ def backtest_agent_llm(
     from .reasoner import estimate_fair_value
 
     log = logging.getLogger("stock_quant.calibration")
-    markets = fetch_resolved_markets(fetch_limit)
+    markets = fetch_resolved_markets(fetch_limit, order=order)
     recs = resolved_yesno_records(markets, since)[:sample]
     if not recs:
         return f"백테스트 대상 없음 (resolved Yes/No, endDate>{since})."
     log.info("agent backtest: %d markets, LLM=%s, workers=%d", len(recs), settings.claude_model, workers)
 
-    def _predict(rec: dict[str, Any]) -> float:
+    def _predict(rec: dict[str, Any]) -> float | None:
         try:
             return estimate_fair_value(rec["question"], context="")  # 컨텍스트 비활성
-        except Exception as e:  # noqa: BLE001 — 개별 실패가 전체를 죽이지 않음
+        except Exception as e:  # noqa: BLE001 — 실패는 제외(0.5 폴백 금지: 지표 오염 방지)
             log.warning("predict failed (%s): %s", rec["question"][:40], e)
-            return 0.5
+            return None
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         preds = list(ex.map(_predict, recs))
 
-    agent_pairs = [(p, r["actual"]) for p, r in zip(preds, recs)]
-    market_pairs = [(r["market_pred"], r["actual"]) for r in recs if r["market_pred"] is not None]
+    # API 실패분은 집계에서 제외 (0.5 로 섞으면 Brier 오염). 같은 성공분으로 시장가와 비교.
+    ok = [(p, r) for p, r in zip(preds, recs) if p is not None]
+    dropped = len(recs) - len(ok)
+
+    from collections import Counter
+    span = " ".join(f"{k}:{v}" for k, v in sorted(Counter(r["end"] for _, r in ok).items()))
+    agent_pairs = [(p, r["actual"]) for p, r in ok]
+    market_pairs = [(r["market_pred"], r["actual"]) for _, r in ok if r["market_pred"] is not None]
+
+    warn = ""
+    if dropped:
+        frac = dropped / len(recs)
+        warn = f"⚠ 예측 {dropped}/{len(recs)}건 API 실패로 제외({frac:.0%}). "
+        if frac > 0.1:
+            warn += "실패 비율이 높아 신뢰도 낮음 — 크레딧 확보 후 재실행 권장. "
     return (
-        format_report(f"에이전트 LLM (컨텍스트 비활성, endDate>{since})", agent_pairs)
+        f"{warn}기간 분포(endDate, order={order}): {span}\n"
+        + format_report(f"에이전트 LLM (컨텍스트 비활성, endDate>{since})", agent_pairs)
         + "\n"
         + format_report(f"같은 마켓 시장가 ~24h전 (n={len(market_pairs)})", market_pairs)
         + "\n\n주의: resolved 마켓 backtest. cutoff 이후 종료분만 사용해 lookahead 최소화했으나, "
