@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 
 from .config import settings
+from .calibration import record_prediction
 from .cost_manager import get_current_balance, pay_api_costs_from_profits
 from .detector import find_opportunities
 from .executor import cancel_all_orders, place_order
@@ -33,6 +34,12 @@ def run_once(scan_limit: int = 500) -> dict:
     orders = []
     try:
         for opp in opps:
+            # forward 페이퍼 캘리브레이션: dry-run 예측을 기록(나중에 해결 시 Brier 채점, §7.3)
+            if settings.dry_run:
+                record_prediction(
+                    str(opp.market.get("conditionId", "")),
+                    opp.question, opp.side, opp.fair_value, opp.market_price,
+                )
             bet_size = bankroll * opp.fraction
             orders.append(place_order(opp, bet_size))
     except Exception:  # noqa: BLE001 — 주문 중 오류 시 미체결 전량 취소(§7.1 킬스위치)

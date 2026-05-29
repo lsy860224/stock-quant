@@ -1,0 +1,245 @@
+"""Brier Score 캘리브레이션 (보고서 §7.3 / §8.3).
+
+Brier score = mean((예측확률 − 실제결과)^2). 0에 가까울수록 정확·잘 보정됨.
+0.25 = 무작정 0.5 찍는 수준의 기준선. 0.25 미만이어야 정보가치가 있다.
+
+두 가지 모드:
+- backtest_market_baseline(): resolved 마켓으로 **시장 가격 자체**의 Brier 를 지금 계산.
+  (LLM 키 불필요. 에이전트 LLM 이 넘어서야 할 기준선.)
+- forward 페이퍼: record_prediction() 으로 dry-run 예측을 누적 → resolve_predictions()
+  로 결과를 채우고 → report() 로 **에이전트(LLM)** Brier 측정.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from .config import settings
+
+_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "calibration.db"
+
+
+# --------------------------------------------------------------------------- #
+# 순수 통계 (네트워크 없음 — 단위 테스트 대상)
+# --------------------------------------------------------------------------- #
+
+def brier_score(pairs: list[tuple[float, float]]) -> float:
+    """pairs = [(예측확률 0~1, 실제결과 0|1), ...] → Brier score."""
+    if not pairs:
+        return float("nan")
+    return sum((p - o) ** 2 for p, o in pairs) / len(pairs)
+
+
+@dataclass
+class CalibrationBin:
+    lo: float
+    hi: float
+    count: int
+    mean_pred: float       # 이 구간 평균 예측확률
+    observed_freq: float    # 이 구간 실제 발생 빈도
+    gap: float              # |mean_pred − observed_freq| (작을수록 잘 보정)
+
+
+def calibration_table(pairs: list[tuple[float, float]], bins: int = 10) -> list[CalibrationBin]:
+    """예측확률을 구간으로 나눠 '예측 vs 실제 빈도' 보정 곡선을 만든다."""
+    buckets: list[list[tuple[float, float]]] = [[] for _ in range(bins)]
+    for p, o in pairs:
+        idx = min(int(p * bins), bins - 1)
+        buckets[idx].append((p, o))
+    table: list[CalibrationBin] = []
+    for i, b in enumerate(buckets):
+        if not b:
+            continue
+        mean_pred = sum(p for p, _ in b) / len(b)
+        observed = sum(o for _, o in b) / len(b)
+        table.append(
+            CalibrationBin(i / bins, (i + 1) / bins, len(b), mean_pred, observed, abs(mean_pred - observed))
+        )
+    return table
+
+
+def format_report(label: str, pairs: list[tuple[float, float]]) -> str:
+    if not pairs:
+        return f"[{label}] 표본 없음."
+    bs = brier_score(pairs)
+    lines = [
+        f"[{label}] n={len(pairs)}  Brier={bs:.4f}  (기준선 0.25; 낮을수록 좋음)",
+        "  pred범위    n   평균예측  실제빈도   gap",
+    ]
+    for b in calibration_table(pairs):
+        lines.append(
+            f"  {b.lo:.1f}-{b.hi:.1f}  {b.count:>4}   {b.mean_pred:.3f}    {b.observed_freq:.3f}   {b.gap:.3f}"
+        )
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# 시장 베이스라인 백테스트 (resolved 마켓, 키 불필요)
+# --------------------------------------------------------------------------- #
+
+def _ua() -> dict[str, str]:
+    return {"User-Agent": settings.http_user_agent}
+
+
+def _parse_json_list(raw: Any) -> list[Any] | None:
+    try:
+        v = json.loads(raw) if isinstance(raw, str) else raw
+        return v if isinstance(v, list) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def fetch_resolved_markets(limit: int = 200) -> list[dict[str, Any]]:
+    """resolved 마켓 수집. Gamma 는 페이지당 100개 상한이라 offset 으로 페이지네이션."""
+    out: list[dict[str, Any]] = []
+    page = 100
+    offset = 0
+    while len(out) < limit:
+        params: dict[str, Any] = {
+            "closed": True, "limit": min(page, limit - len(out)),
+            "offset": offset, "order": "volume24hr", "ascending": False,
+        }
+        resp = requests.get(f"{settings.gamma_api}/markets", params=params, headers=_ua(), timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        batch = data if isinstance(data, list) else data.get("data", [])
+        if not batch:
+            break
+        out.extend(batch)
+        offset += len(batch)
+        if len(batch) < page:
+            break
+    return out
+
+
+def market_baseline_pairs(markets: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    """resolved 이진 마켓에서 (시장가_해결~24h전, 실제결과) 쌍을 만든다.
+
+    - 실제결과: outcomePrices[0] (이진 마켓에서 0 또는 1 로 해결).
+    - 예측(시장가): lastTradePrice − oneDayPriceChange 로 ~24h 전 가격을 복원 후 [0,1] 클램프.
+      (별도 히스토리 호출 없이 Gamma 필드만으로 베이스라인 산출.)
+    """
+    pairs: list[tuple[float, float]] = []
+    for m in markets:
+        outcomes = _parse_json_list(m.get("outcomes"))
+        prices = _parse_json_list(m.get("outcomePrices"))
+        if not outcomes or len(outcomes) != 2 or not prices or len(prices) != 2:
+            continue
+        if str(m.get("umaResolutionStatus")) != "resolved":
+            continue
+        try:
+            actual = float(prices[0])
+        except (ValueError, TypeError):
+            continue
+        if actual not in (0.0, 1.0):  # 깔끔히 해결된 것만
+            continue
+        last = m.get("lastTradePrice")
+        chg = m.get("oneDayPriceChange")
+        if last is None or chg is None:
+            continue
+        try:
+            pred = float(last) - float(chg)  # ~24h 전 가격 복원
+        except (ValueError, TypeError):
+            continue
+        pred = max(0.0, min(1.0, pred))
+        pairs.append((pred, actual))
+    return pairs
+
+
+def backtest_market_baseline(limit: int = 200) -> str:
+    markets = fetch_resolved_markets(limit)
+    pairs = market_baseline_pairs(markets)
+    return format_report(f"시장 베이스라인 (resolved {len(markets)}건 중 {len(pairs)}건)", pairs)
+
+
+# --------------------------------------------------------------------------- #
+# Forward 페이퍼 캘리브레이션 (SQLite 누적 → 해결 시 채점)
+# --------------------------------------------------------------------------- #
+
+def _connect() -> sqlite3.Connection:
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(_DB_PATH)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS predictions (
+            condition_id TEXT, question TEXT, side TEXT,
+            predicted REAL, market_price REAL,
+            outcome REAL, recorded_at REAL, resolved_at REAL,
+            PRIMARY KEY (condition_id, recorded_at)
+        )"""
+    )
+    return conn
+
+
+def record_prediction(
+    condition_id: str, question: str, side: str, predicted: float, market_price: float
+) -> None:
+    """dry-run 루프에서 예측 1건을 기록 (forward 페이퍼)."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?)",
+            (condition_id, question, side, predicted, market_price, None, time.time(), None),
+        )
+
+
+def resolve_predictions() -> int:
+    """미해결 예측의 마켓을 Gamma 에서 조회해 결과(outcome)를 채운다. 채운 건수 반환."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT condition_id FROM predictions WHERE outcome IS NULL"
+        ).fetchall()
+        resolved = 0
+        for (cid,) in rows:
+            outcome = _fetch_outcome(cid)
+            if outcome is None:
+                continue
+            conn.execute(
+                "UPDATE predictions SET outcome=?, resolved_at=? WHERE condition_id=? AND outcome IS NULL",
+                (outcome, time.time(), cid),
+            )
+            resolved += 1
+        return resolved
+
+
+def _fetch_outcome(condition_id: str) -> float | None:
+    """conditionId 로 CLOB 마켓을 조회해 outcome[0] 결과(1.0|0.0)를 반환, 미해결이면 None.
+
+    CLOB `/markets/{conditionId}` 의 tokens[].winner 로 판정 (라이브 검증한 방식).
+    """
+    resp = requests.get(f"{settings.clob_host}/markets/{condition_id}", headers=_ua(), timeout=30)
+    if not resp.ok:
+        return None
+    d = resp.json()
+    tokens = d.get("tokens") or []
+    if not d.get("closed") or len(tokens) != 2:
+        return None
+    if tokens[0].get("winner") is True:
+        return 1.0
+    if tokens[1].get("winner") is True:
+        return 0.0
+    return None  # closed 지만 승자 미확정 → 다음 resolve 때 재시도
+
+
+def report() -> str:
+    """기록된 forward 예측의 에이전트(LLM) Brier 리포트."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT predicted, market_price, outcome FROM predictions WHERE outcome IS NOT NULL"
+        ).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+    if not rows:
+        return f"forward 예측 {total}건 기록됨, 해결된 건 0. 마켓이 해결되면 `calibrate --resolve` 후 재실행."
+    agent_pairs = [(p, o) for p, _, o in rows]
+    market_pairs = [(mp, o) for _, mp, o in rows]
+    return (
+        format_report("에이전트 LLM", agent_pairs)
+        + "\n"
+        + format_report("같은 마켓 시장가", market_pairs)
+        + f"\n\n(전체 기록 {total}건 중 {len(rows)}건 해결됨. 에이전트 Brier < 시장가 Brier 여야 edge 가 실재.)"
+    )

@@ -119,7 +119,12 @@ python main.py
 
 **비용 구조(§7.2):** Claude API ~$0.003/call (절감 시 Haiku 다운시프트) · VPS $4.5~6/월 · Polymarket 수수료 Maker/Taker **0%** · 브릿지 가스 <$0.01.
 
-**모니터링(§7.3):** 수익/손실 실시간 로깅, API 비용 추적(수익 대비 %), 카테고리별 성과, **Brier Score로 예측 캘리브레이션 측정**.
+**모니터링(§7.3):** 수익/손실 실시간 로깅, API 비용 추적(수익 대비 %), 카테고리별 성과, **Brier Score로 예측 캘리브레이션 측정**(`calibration.py`).
+
+> **Brier 캘리브레이션 (`calibration.py`, 구현됨):** `stock-quant calibrate`. 두 모드:
+> - `--backtest`: resolved 마켓의 **시장가 베이스라인** Brier (키 불필요, offset 페이지네이션). 2026-05-29 측정 = **0.2198** (n=489) — 시장 ~24h 전 가격은 0.25 동전던지기를 근소하게만 상회. 에이전트 LLM 이 넘어서야 할 기준.
+> - forward 페이퍼: dry-run 루프가 `record_prediction` 으로 예측을 `data/calibration.db`(SQLite, gitignore)에 누적 → `--resolve`(CLOB `/markets/{conditionId}` 의 `tokens[].winner` 로 결과 판정) → `--report`(에이전트 vs 시장가 Brier 비교).
+> - **에이전트 Brier < 시장가 Brier** 여야 edge 가 실재. resolved 마켓엔 active 엔 없는 `outcomePrices`(`["0","1"]`)·`umaResolutionStatus="resolved"` 가 존재.
 
 ## 6. 작업 원칙
 
