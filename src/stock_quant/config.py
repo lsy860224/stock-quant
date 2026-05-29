@@ -41,6 +41,14 @@ class Settings:
     # --- LLM ---
     claude_model: str = os.getenv("CLAUDE_MODEL", "claude-opus-4-8")
 
+    # --- 데이터 소스 (§5.2) ---
+    # NOAA/Nominatim 은 연락처 포함 User-Agent 를 요구(rate-limit 정책). 키 불필요.
+    http_user_agent: str = os.getenv(
+        "HTTP_USER_AGENT", "stock-quant/0.0.1 (research; contact via .env HTTP_USER_AGENT)"
+    )
+    news_api_key: str = os.getenv("NEWS_API_KEY", "")  # 없으면 뉴스 fallback 비활성(빈 컨텍스트)
+    http_timeout: float = _f("HTTP_TIMEOUT", 10.0)
+
     @property
     def dry_run(self) -> bool:
         """라이브 주문은 DRY_RUN=false 일 때만. 그 외 모든 값/미설정은 안전 측(dry-run)."""

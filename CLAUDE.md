@@ -82,11 +82,11 @@ python main.py
 | Kelly Calculator | 베팅 비율 `f = (p·b − (1−p))/b`, 상한 6% | 자체 로직 |
 | Order Executor | CLOB 주문 제출·체결 (edge>0 → YES, <0 → NO) | py-clob-client |
 | Cost Manager | 수익에서 API 비용 차감, 잔고 감시, **잔고 0 → 종료** | 자체 로직 |
-| (선택) Data Fetchers | 카테고리별 외부 데이터 | NOAA(날씨)/ESPN(스포츠)/Dune(크립토) 등 |
+| Data Fetchers | 카테고리별 외부 데이터 (구현됨, best-effort) | NOAA(날씨)·ESPN(스포츠)·CoinGecko(크립토)·NewsAPI(fallback) |
 
 **설계 의도(§2 note):** "살아남으려면 수익을 내야 한다"는 생존 압력 = 사망 메커니즘 = 사실상 킬 스위치. 강화학습 유사 자기선택.
 
-**컨텍스트 라우팅(§6.6):** `market.category`로 분기 — weather→NOAA, sports→injury report, crypto→온체인 메트릭, else→뉴스 검색. 추정 프롬프트 골격 = ① 역사적 기저율(base rate) → ② 현재 증거 → ③ 시장가와의 차이 → "숫자만(0~100)".
+**컨텍스트 라우팅(§6.6, `context.py` 구현됨):** `market.category`로 분기 — weather→NOAA(미국 한정, Nominatim 지오코딩 + 행정구역 검증으로 동명 POI 오매칭 차단), sports→ESPN 검색, crypto→CoinGecko 시세(진짜 온체인 Dune/Nansen 은 키 필요 — 미구현 확장 지점), else→NewsAPI(`NEWS_API_KEY` 있을 때만). 키 없는 NOAA/ESPN/CoinGecko 는 즉시 동작. 모든 fetcher 는 **best-effort** — 실패/미해결 시 빈 문자열 반환, 절대 루프로 예외를 던지지 않는다(reasoner 가 기저율로 폴백). 추정 프롬프트 골격 = ① 역사적 기저율(base rate) → ② 현재 증거 → ③ 시장가와의 차이 → "숫자만(0~100)".
 
 **핵심 엔드포인트:** Gamma `https://gamma-api.polymarket.com` · CLOB `https://clob.polymarket.com`. 코드 스니펫은 보고서 §6.1~6.6에 그대로 있음 — 구현 시 출발점으로 사용.
 
