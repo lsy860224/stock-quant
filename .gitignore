@@ -1,0 +1,27 @@
+# --- SECRETS: never commit (CLAUDE.md §3 key security) ---
+.env
+.env.*
+!.env.example
+*.pem
+*_private_key*
+wallet*.json
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime artifacts
+logs/
+*.log
+data/*.db
+data/*.sqlite
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
