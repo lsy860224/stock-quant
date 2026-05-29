@@ -125,6 +125,9 @@ python main.py
 > - `--backtest`: resolved 마켓의 **시장가 베이스라인** Brier (키 불필요, offset 페이지네이션). 2026-05-29 측정 = **0.2198** (n=489) — 시장 ~24h 전 가격은 0.25 동전던지기를 근소하게만 상회. 에이전트 LLM 이 넘어서야 할 기준.
 > - forward 페이퍼: dry-run 루프가 `record_prediction` 으로 예측을 `data/calibration.db`(SQLite, gitignore)에 누적 → `--resolve`(CLOB `/markets/{conditionId}` 의 `tokens[].winner` 로 결과 판정) → `--report`(에이전트 vs 시장가 Brier 비교).
 > - **에이전트 Brier < 시장가 Brier** 여야 edge 가 실재. resolved 마켓엔 active 엔 없는 `outcomePrices`(`["0","1"]`)·`umaResolutionStatus="resolved"` 가 존재.
+> - `--agent`: 에이전트 LLM 백테스트 (cutoff 이후 종료분 + 컨텍스트 비활성으로 lookahead 최소화).
+
+> ⚠️ **측정된 결과 (2026-05-29): 현재 에이전트는 edge 가 없다.** `--agent` 백테스트(n=130) = **Brier 0.2350** vs 같은 마켓 시장가 **0.1637**. LLM 이 시장보다 나쁘고 극단에서 과신(예: ~4% 예측이 실제 20% 발생). **라이브 자금 거래 금지** — edge 를 입증(에이전트 Brier < 시장가)하기 전까지 dry-run/연구 전용. 개선 방향: 컨텍스트 활성 효과 측정, 확률 보정(calibration) 레이어, 카테고리 선별.
 
 ## 6. 작업 원칙
 

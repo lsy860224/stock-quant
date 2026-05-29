@@ -159,6 +159,81 @@ def backtest_market_baseline(limit: int = 200) -> str:
     return format_report(f"시장 베이스라인 (resolved {len(markets)}건 중 {len(pairs)}건)", pairs)
 
 
+def resolved_yesno_records(markets: list[dict[str, Any]], since: str) -> list[dict[str, Any]]:
+    """resolved 이진 Yes/No 마켓만 추출 (에이전트가 실제 거래하는 유형과 동일).
+
+    since(YYYY-MM-DD) 이후 종료분만 → 모델 cutoff 이후라 lookahead 최소화.
+    각 레코드: question / actual(0|1, outcome[0]=YES) / market_pred(~24h전 시장가).
+    """
+    recs: list[dict[str, Any]] = []
+    for m in markets:
+        outcomes = _parse_json_list(m.get("outcomes"))
+        prices = _parse_json_list(m.get("outcomePrices"))
+        if not outcomes or [str(o).lower() for o in outcomes] != ["yes", "no"]:
+            continue
+        if not prices or len(prices) != 2 or str(m.get("umaResolutionStatus")) != "resolved":
+            continue
+        if (m.get("endDate") or "") <= since:
+            continue
+        try:
+            actual = float(prices[0])
+        except (ValueError, TypeError):
+            continue
+        if actual not in (0.0, 1.0):
+            continue
+        market_pred = None
+        last, chg = m.get("lastTradePrice"), m.get("oneDayPriceChange")
+        if last is not None and chg is not None:
+            try:
+                market_pred = max(0.0, min(1.0, float(last) - float(chg)))
+            except (ValueError, TypeError):
+                market_pred = None
+        recs.append({"question": m["question"], "actual": actual, "market_pred": market_pred})
+    return recs
+
+
+def backtest_agent_llm(
+    sample: int = 120, fetch_limit: int = 1000, since: str = "2026-01-31", workers: int = 8
+) -> str:
+    """에이전트 LLM 의 Brier 를 resolved 마켓으로 측정 (ANTHROPIC_API_KEY 필요).
+
+    lookahead 방지: (1) cutoff 이후 종료분만, (2) 라이브 컨텍스트 fetcher 비활성(context="")
+    — 해결 후 데이터가 누설되지 않도록 질문+모델 지식만으로 예측.
+    """
+    import logging
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .reasoner import estimate_fair_value
+
+    log = logging.getLogger("stock_quant.calibration")
+    markets = fetch_resolved_markets(fetch_limit)
+    recs = resolved_yesno_records(markets, since)[:sample]
+    if not recs:
+        return f"백테스트 대상 없음 (resolved Yes/No, endDate>{since})."
+    log.info("agent backtest: %d markets, LLM=%s, workers=%d", len(recs), settings.claude_model, workers)
+
+    def _predict(rec: dict[str, Any]) -> float:
+        try:
+            return estimate_fair_value(rec["question"], context="")  # 컨텍스트 비활성
+        except Exception as e:  # noqa: BLE001 — 개별 실패가 전체를 죽이지 않음
+            log.warning("predict failed (%s): %s", rec["question"][:40], e)
+            return 0.5
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        preds = list(ex.map(_predict, recs))
+
+    agent_pairs = [(p, r["actual"]) for p, r in zip(preds, recs)]
+    market_pairs = [(r["market_pred"], r["actual"]) for r in recs if r["market_pred"] is not None]
+    return (
+        format_report(f"에이전트 LLM (컨텍스트 비활성, endDate>{since})", agent_pairs)
+        + "\n"
+        + format_report(f"같은 마켓 시장가 ~24h전 (n={len(market_pairs)})", market_pairs)
+        + "\n\n주의: resolved 마켓 backtest. cutoff 이후 종료분만 사용해 lookahead 최소화했으나, "
+        "AI/메타 등 일부 질문은 모델이 결과를 알 수 있어 낙관 편향 가능. "
+        "**에이전트 Brier < 시장가 Brier** 여야 edge 가 실재한다는 신호."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Forward 페이퍼 캘리브레이션 (SQLite 누적 → 해결 시 채점)
 # --------------------------------------------------------------------------- #

@@ -35,11 +35,17 @@ approve 1회 설정. 지갑 유형에 따라 `CLOB_SIGNATURE_TYPE`/`CLOB_FUNDER_
 # 1) 시장 베이스라인 — 지금 바로 (LLM 키 불필요). 에이전트가 넘어서야 할 기준.
 uv run stock-quant calibrate --backtest --limit 1000
 
-# 2) forward 페이퍼 — dry-run 루프가 예측을 자동 기록 → 마켓 해결 후 채점
+# 2) 에이전트 LLM 백테스트 — resolved 마켓 (ANTHROPIC_API_KEY 필요)
+uv run stock-quant calibrate --agent --sample 130
+
+# 3) forward 페이퍼 — dry-run 루프가 예측을 자동 기록 → 마켓 해결 후 채점
 uv run stock-quant run --once          # 예측 누적 (ANTHROPIC_API_KEY 필요)
 uv run stock-quant calibrate --resolve # 해결된 마켓 결과 반영
 uv run stock-quant calibrate --report  # 에이전트 LLM vs 시장가 Brier
 ```
+
+> ⚠️ **측정 결과 (2026-05-29): 에이전트 Brier 0.235 > 시장가 0.164 — edge 없음.**
+> 현재 LLM 은 시장을 이기지 못하므로 라이브 거래 금지. dry-run/연구 전용.
 
 Brier score = `mean((예측−결과)²)`. 0.25 = 동전던지기 기준선, 낮을수록 좋음.
 **에이전트 Brier < 시장가 Brier 여야 edge 가 실재**한다. 예측은 `data/calibration.db`(gitignore)에 누적.
