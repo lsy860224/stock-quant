@@ -123,7 +123,7 @@ python main.py
 
 > **Brier 캘리브레이션 (`calibration.py`, 구현됨):** `stock-quant calibrate`. 두 모드:
 > - `--backtest`: resolved 마켓의 **시장가 베이스라인** Brier (키 불필요, offset 페이지네이션). 2026-05-29 측정 = **0.2198** (n=489) — 시장 ~24h 전 가격은 0.25 동전던지기를 근소하게만 상회. 에이전트 LLM 이 넘어서야 할 기준.
-> - forward 페이퍼: dry-run 루프가 `record_prediction` 으로 예측을 `data/calibration.db`(SQLite, gitignore)에 누적 → `--resolve`(CLOB `/markets/{conditionId}` 의 `tokens[].winner` 로 결과 판정) → `--report`(에이전트 vs 시장가 Brier 비교).
+> - forward 페이퍼: `--snapshot`(현재 Yes/No 마켓에 **컨텍스트 포함** 예측을 무편향 기록, horizon_days 내 종료분 우선) 또는 dry-run 루프가 `record_prediction` 으로 `data/calibration.db`(SQLite, gitignore)에 누적 → `--resolve`(CLOB `/markets/{conditionId}` 의 `tokens[].winner` 로 결과 판정) → `--report`(에이전트 vs 시장가 Brier). forward 는 lookahead 없는 컨텍스트 포함 측정이나 마켓 해결까지 대기 필요.
 > - **에이전트 Brier < 시장가 Brier** 여야 edge 가 실재. resolved 마켓엔 active 엔 없는 `outcomePrices`(`["0","1"]`)·`umaResolutionStatus="resolved"` 가 존재.
 > - `--agent`: 에이전트 LLM 백테스트 (cutoff 이후 종료분 + 컨텍스트 비활성으로 lookahead 최소화).
 

@@ -38,11 +38,15 @@ uv run stock-quant calibrate --backtest --limit 1000
 # 2) 에이전트 LLM 백테스트 — resolved 마켓 (ANTHROPIC_API_KEY 필요)
 uv run stock-quant calibrate --agent --sample 130
 
-# 3) forward 페이퍼 — dry-run 루프가 예측을 자동 기록 → 마켓 해결 후 채점
-uv run stock-quant run --once          # 예측 누적 (ANTHROPIC_API_KEY 필요)
-uv run stock-quant calibrate --resolve # 해결된 마켓 결과 반영
-uv run stock-quant calibrate --report  # 에이전트 LLM vs 시장가 Brier
+# 3) forward 페이퍼 (컨텍스트 포함, 무편향) — 현재 마켓에 예측 기록 → 해결 후 채점
+uv run stock-quant calibrate --snapshot --horizon-days 14   # 14일 내 종료 Yes/No 마켓 예측 기록
+uv run stock-quant calibrate --resolve                       # 해결된 마켓 결과 반영
+uv run stock-quant calibrate --report                        # 에이전트 LLM vs 시장가 Brier
+# (dry-run 루프 `run --once` 도 거래 후보 예측을 자동 기록)
 ```
+
+forward 는 컨텍스트 포함 예측의 **무편향**(lookahead 없음) 측정이지만, 마켓이 해결돼야
+Brier 가 나온다(스냅샷 후 며칠~). 백테스트(컨텍스트 비활성)와 비교해 컨텍스트 효과를 본다.
 
 > ⚠️ **측정 결과 (2026-05-29): 에이전트 Brier 0.235 > 시장가 0.164 — edge 없음.**
 > 현재 LLM 은 시장을 이기지 못하므로 라이브 거래 금지. dry-run/연구 전용.

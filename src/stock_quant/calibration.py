@@ -238,6 +238,77 @@ def backtest_agent_llm(
 # Forward 페이퍼 캘리브레이션 (SQLite 누적 → 해결 시 채점)
 # --------------------------------------------------------------------------- #
 
+def snapshot_predictions(
+    sample: int = 60, scan_limit: int = 500, horizon_days: int = 14, workers: int = 6
+) -> str:
+    """현재 열린 Yes/No 마켓에 **컨텍스트 포함** 예측을 기록 (forward 페이퍼).
+
+    백테스트와 달리 edge 필터 없이 샘플 전체를 기록(무편향 캘리브레이션).
+    horizon_days 내 종료 마켓 우선 → 며칠 내 --resolve/--report 로 채점 가능.
+    마켓이 아직 안 열렸으니 Brier 는 지금 안 나오고, 해결 후 산출된다.
+    """
+    import logging
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timedelta, timezone
+
+    from .context import get_context
+    from .detector import _is_yes_no, _yes_price
+    from .reasoner import estimate_fair_value
+    from .scanner import scan_markets
+
+    log = logging.getLogger("stock_quant.calibration")
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=horizon_days)
+
+    def _ends_soon(m: dict[str, Any]) -> bool:
+        raw = m.get("endDate")
+        if not raw:
+            return False
+        try:
+            end = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return now < end <= cutoff
+
+    markets = scan_markets(scan_limit)
+    cands: list[tuple[dict[str, Any], float]] = []
+    for m in markets:
+        if not _is_yes_no(m) or not _ends_soon(m):
+            continue
+        if float(m.get("liquidityNum", 0) or 0) < settings.min_liquidity:
+            continue
+        price = _yes_price(m)
+        if price is None:
+            continue
+        cands.append((m, price))
+        if len(cands) >= sample:
+            break
+
+    if not cands:
+        return f"snapshot 대상 없음 (Yes/No, {horizon_days}일 내 종료, liquidity≥{settings.min_liquidity})."
+    log.info("snapshot: %d markets, context-included, LLM=%s", len(cands), settings.claude_model)
+
+    def _predict(item: tuple[dict[str, Any], float]) -> tuple[dict[str, Any], float, float]:
+        m, price = item
+        fair = estimate_fair_value(m["question"], get_context(m))  # 컨텍스트 포함
+        return m, price, fair
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(_predict, cands))
+
+    for m, price, fair in results:
+        side = "YES" if fair >= price else "NO"
+        record_prediction(str(m.get("conditionId", "")), m["question"], side, fair, price)
+
+    edges = [abs(fair - price) for _, price, fair in results]
+    big = sum(1 for e in edges if e >= settings.edge_threshold)
+    return (
+        f"snapshot: {len(results)}건 컨텍스트 포함 예측 기록 → data/calibration.db "
+        f"(|edge|≥{settings.edge_threshold:.0%}: {big}건). "
+        f"{horizon_days}일 내 종료 예정 — 이후 `calibrate --resolve` → `--report` 로 Brier 산출."
+    )
+
+
 def _connect() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)

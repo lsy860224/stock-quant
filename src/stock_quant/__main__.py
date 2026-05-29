@@ -24,11 +24,13 @@ def main() -> None:
     p_cal = sub.add_parser("calibrate", help="Brier score 캘리브레이션")
     p_cal.add_argument("--backtest", action="store_true", help="resolved 마켓 시장 베이스라인 (키 불필요)")
     p_cal.add_argument("--agent", action="store_true", help="에이전트 LLM Brier 백테스트 (ANTHROPIC_API_KEY 필요)")
+    p_cal.add_argument("--snapshot", action="store_true", help="현재 마켓에 컨텍스트 포함 예측 기록 (forward)")
     p_cal.add_argument("--resolve", action="store_true", help="기록된 예측의 결과를 Gamma 에서 채움")
     p_cal.add_argument("--report", action="store_true", help="forward 페이퍼 Brier 리포트")
     p_cal.add_argument("--limit", type=int, default=200, help="시장 베이스라인 표본 수")
-    p_cal.add_argument("--sample", type=int, default=120, help="에이전트 백테스트 LLM 호출 수")
+    p_cal.add_argument("--sample", type=int, default=120, help="백테스트/스냅샷 LLM 호출 수")
     p_cal.add_argument("--since", default="2026-01-31", help="이 날짜 이후 종료분만 (lookahead 방지)")
+    p_cal.add_argument("--horizon-days", type=int, default=14, help="스냅샷: 며칠 내 종료 마켓만")
 
     # 하위호환: 인자 없거나 --once/--limit 만 주면 run 으로 취급
     args, _ = parser.parse_known_args()
@@ -57,10 +59,12 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         print(calibration.backtest_market_baseline(limit=args.limit))
     if args.agent:
         print(calibration.backtest_agent_llm(sample=args.sample, since=args.since))
+    if args.snapshot:
+        print(calibration.snapshot_predictions(sample=args.sample, horizon_days=args.horizon_days))
     if args.resolve:
         n = calibration.resolve_predictions()
         print(f"resolved {n} markets.")
-    if args.report or not (args.backtest or args.agent or args.resolve):
+    if args.report or not (args.backtest or args.agent or args.snapshot or args.resolve):
         print(calibration.report())
 
 
