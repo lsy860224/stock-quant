@@ -13,6 +13,7 @@ Brier score = mean((예측확률 − 실제결과)^2). 0에 가까울수록 정�
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -66,6 +67,43 @@ def calibration_table(pairs: list[tuple[float, float]], bins: int = 10) -> list[
             CalibrationBin(i / bins, (i + 1) / bins, len(b), mean_pred, observed, abs(mean_pred - observed))
         )
     return table
+
+
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def _logit(p: float, eps: float = 0.01) -> float:
+    p = min(1 - eps, max(eps, p))
+    return math.log(p / (1 - p))
+
+
+def apply_temperature(p: float, t: float) -> float:
+    """Temperature scaling: logit 을 T 로 나눠 0.5 쪽으로 수축. T>1 → 과신 완화."""
+    return _sigmoid(_logit(p) / t)
+
+
+def fit_temperature(pairs: list[tuple[float, float]], lo: float = 0.5, hi: float = 6.0) -> float:
+    """학습쌍에서 Brier 를 최소화하는 T 를 1D 그리드 탐색으로 추정."""
+    best_t, best = 1.0, float("inf")
+    steps = 111
+    for i in range(steps):
+        t = lo + (hi - lo) * i / (steps - 1)
+        b = sum((apply_temperature(p, t) - o) ** 2 for p, o in pairs) / len(pairs)
+        if b < best:
+            best, best_t = b, t
+    return best_t
+
+
+def loocv_calibrated(pairs: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """LOOCV: 각 점을 나머지로 학습한 T 로 보정 → out-of-sample 보정 예측쌍 반환."""
+    n = len(pairs)
+    out: list[tuple[float, float]] = []
+    for i in range(n):
+        train = [pairs[j] for j in range(n) if j != i]
+        t = fit_temperature(train)
+        out.append((apply_temperature(pairs[i][0], t), pairs[i][1]))
+    return out
 
 
 def format_report(label: str, pairs: list[tuple[float, float]]) -> str:
@@ -447,6 +485,43 @@ def _fetch_outcome(condition_id: str) -> float | None:
     if tokens[1].get("winner") is True:
         return 0.0
     return None  # closed 지만 승자 미확정 → 다음 resolve 때 재시도
+
+
+def tune_calibration() -> str:
+    """과신 보정(temperature scaling)이 out-of-sample 로 Brier 를 개선하는지 LOOCV 로 측정.
+
+    학습/평가를 분리(LOOCV)해 순환논리 방지. 크레딧 불필요(저장된 해결쌍 재사용).
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT predicted, market_price, outcome FROM predictions WHERE outcome IS NOT NULL"
+        ).fetchall()
+    if len(rows) < 10:
+        return f"보정 학습엔 표본 부족 (해결 {len(rows)}건, 최소 10). 마켓 더 해결 후 재시도."
+
+    agent = [(p, o) for p, _, o in rows]
+    market = [(mp, o) for _, mp, o in rows]
+    raw_brier = brier_score(agent)
+    cal_brier = brier_score(loocv_calibrated(agent))   # out-of-sample
+    mkt_brier = brier_score(market)
+    t_full = fit_temperature(agent)                     # 참고용 전체적합 T
+    improve = raw_brier - cal_brier
+
+    lines = [
+        f"보정 레이어 평가 (temperature scaling, LOOCV, n={len(agent)})",
+        f"  에이전트 원본 Brier   : {raw_brier:.4f}",
+        f"  에이전트 보정 Brier   : {cal_brier:.4f}  ({improve:+.4f}, {'개선' if improve > 0 else '악화/무변'})",
+        f"  시장가 Brier (목표)   : {mkt_brier:.4f}",
+        f"  적합된 T (전체)       : {t_full:.2f}  ({'과신→수축' if t_full > 1.1 else '거의 보정 불필요' if t_full < 1.1 else ''})",
+        "",
+    ]
+    if cal_brier <= mkt_brier:
+        lines.append("판정: ✅ 보정 후 시장가 도달/추월 — edge 가능성. 추가 검증 가치.")
+    elif improve > 0.005:
+        lines.append("판정: ⚠ 보정이 개선은 하나 여전히 시장가에 못 미침 — 과신 외 '판별력' 부족이 원인.")
+    else:
+        lines.append("판정: ❌ 보정해도 의미 개선 없음 — 문제는 confidence 가 아니라 예측 자체(판별력). edge 없음 재확인.")
+    return "\n".join(lines)
 
 
 def report() -> str:

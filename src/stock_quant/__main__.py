@@ -27,6 +27,7 @@ def main() -> None:
     p_cal.add_argument("--snapshot", action="store_true", help="현재 마켓에 컨텍스트 포함 예측 기록 (forward)")
     p_cal.add_argument("--resolve", action="store_true", help="기록된 예측의 결과를 Gamma 에서 채움")
     p_cal.add_argument("--report", action="store_true", help="forward 페이퍼 Brier 리포트")
+    p_cal.add_argument("--tune", action="store_true", help="과신 보정(temperature) LOOCV 평가")
     p_cal.add_argument("--export-seed", action="store_true", help="예측을 커밋용 JSONL 시드로 내보냄")
     p_cal.add_argument("--limit", type=int, default=200, help="시장 베이스라인 표본 수")
     p_cal.add_argument("--sample", type=int, default=120, help="백테스트/스냅샷 LLM 호출 수")
@@ -68,7 +69,11 @@ def _run_calibrate(args: argparse.Namespace) -> None:
     if args.resolve:
         n = calibration.resolve_predictions()
         print(f"resolved {n} markets.")
-    if args.report or not (args.backtest or args.agent or args.snapshot or args.resolve or args.export_seed):
+    if args.tune:
+        print(calibration.tune_calibration())
+    if args.report or not (
+        args.backtest or args.agent or args.snapshot or args.resolve or args.export_seed or args.tune
+    ):
         print(calibration.report())
 
 

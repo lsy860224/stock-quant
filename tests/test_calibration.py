@@ -2,7 +2,13 @@
 
 import math
 
-from stock_quant.calibration import brier_score, calibration_table, market_baseline_pairs
+from stock_quant.calibration import (
+    apply_temperature,
+    brier_score,
+    calibration_table,
+    fit_temperature,
+    market_baseline_pairs,
+)
 
 
 def test_brier_perfect():
@@ -31,6 +37,24 @@ def test_calibration_table_groups_and_measures_gap():
     assert hi.mean_pred == 0.9
     assert hi.observed_freq == 0.5
     assert math.isclose(hi.gap, 0.4)
+
+
+def test_temperature_identity_and_shrinkage():
+    # T=1 → 항등. T>1 → 0.5 쪽으로 수축(과신 완화).
+    assert math.isclose(apply_temperature(0.9, 1.0), 0.9, abs_tol=1e-6)
+    shrunk = apply_temperature(0.9, 2.0)
+    assert 0.5 < shrunk < 0.9
+
+
+def test_fit_temperature_detects_overconfidence():
+    # 0.95 확신했지만 실제 반반 → 과신 → 적합 T > 1 (수축 방향).
+    pairs = [(0.95, 1.0), (0.95, 0.0), (0.05, 1.0), (0.05, 0.0)]
+    t = fit_temperature(pairs)
+    assert t > 1.0
+    # 보정이 학습셋 Brier 를 개선해야 함.
+    raw = brier_score(pairs)
+    cal = brier_score([(apply_temperature(p, t), o) for p, o in pairs])
+    assert cal <= raw
 
 
 def test_market_baseline_pairs_reconstructs_and_filters():
